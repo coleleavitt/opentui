@@ -1,5 +1,6 @@
 import { test, expect, beforeAll, beforeEach, afterEach, afterAll } from "bun:test"
 import { MarkdownRenderable, type MarkdownOptions } from "../Markdown.js"
+import { BoxRenderable } from "../Box.js"
 import { CodeRenderable } from "../Code.js"
 import { TextRenderable } from "../Text.js"
 import { TextTableRenderable } from "../TextTable.js"
@@ -2198,6 +2199,37 @@ The table alignment uses:
   expect(headingSpan2!.fg.g).toBe(1)
   expect(headingSpan2!.fg.b).toBe(0)
   expect(headingSpan2!.attributes & TextAttributes.BOLD).toBeTruthy()
+})
+
+test("narrow markdown list wrapping does not duplicate CJK glyphs at wrap boundary", async () => {
+  const md = createMarkdownRenderable({
+    id: "markdown-cjk-wrap-regression",
+    content: "- 在aber (“但”)引入的转折从句前表示让步：虽然，的确",
+    syntaxStyle,
+    conceal: true,
+  })
+
+  const wrapper = new BoxRenderable(renderer, {
+    id: "markdown-cjk-wrap-wrapper",
+    width: 38,
+    paddingLeft: 2,
+    paddingRight: 2,
+  })
+
+  wrapper.add(md)
+  renderer.root.add(wrapper)
+  await renderMarkdownRenderable(md)
+
+  const lines = captureFrame()
+    .split("\n")
+    .map((line) => line.trimEnd())
+
+  expect("\n" + lines.join("\n").trimEnd()).toMatchInlineSnapshot(`
+    "
+      - 在aber (“但”)
+      引入的转折从句前表示让步：虽然，的
+      确"
+  `)
 })
 
 // Paragraph rendering tests
