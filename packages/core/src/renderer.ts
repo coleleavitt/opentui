@@ -21,6 +21,7 @@ import { EventEmitter } from "events"
 import { destroySingleton, hasSingleton, singleton } from "./lib/singleton.js"
 import { getObjectsInViewport } from "./lib/objects-in-viewport.js"
 import { KeyHandler, InternalKeyHandler } from "./lib/KeyHandler.js"
+import { isEditBufferRenderable, type EditBufferRenderable } from "./renderables/EditBufferRenderable.js"
 import { env, registerEnvVar } from "./lib/env.js"
 import { getTreeSitterClient } from "./lib/tree-sitter/index.js"
 import {
@@ -36,6 +37,36 @@ import {
 } from "./lib/terminal-capability-detection.js"
 import { type Clock, type TimerHandle, SystemClock } from "./lib/clock.js"
 import { StdinParser, type StdinEvent, type StdinParserProtocolContext } from "./lib/stdin-parser.js"
+import { matchesKeyBinding } from "./lib/keymapping.js"
+
+const OSC_THEME_RESPONSE =
+  /\x1b](10|11);(?:(?:rgb:)([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)|#([0-9a-fA-F]{6}))(?:\x07|\x1b\\)/g
+
+function scaleOscThemeComponent(component: string): string {
+  const value = parseInt(component, 16)
+  const maxValue = (1 << (4 * component.length)) - 1
+  return Math.round((value / maxValue) * 255)
+    .toString(16)
+    .padStart(2, "0")
+}
+
+function oscThemeColorToHex(r?: string, g?: string, b?: string, hex6?: string): string {
+  if (hex6) {
+    return `#${hex6.toLowerCase()}`
+  }
+
+  if (r && g && b) {
+    return `#${scaleOscThemeComponent(r)}${scaleOscThemeComponent(g)}${scaleOscThemeComponent(b)}`
+  }
+
+  return "#000000"
+}
+
+function inferThemeModeFromBackgroundColor(color: string): ThemeMode {
+  const [r, g, b] = parseColor(color).toInts()
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000
+  return brightness > 128 ? "light" : "dark"
+}
 
 registerEnvVar({
   name: "OTUI_DUMP_CAPTURES",
@@ -464,6 +495,7 @@ export enum CliRenderEvents {
   RESIZE = "resize",
   FOCUS = "focus",
   BLUR = "blur",
+  FOCUSED_EDITOR = "focused_editor",
   THEME_MODE = "theme_mode",
   CAPABILITIES = "capabilities",
   SELECTION = "selection",
@@ -502,7 +534,11 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private automaticMemorySnapshot: boolean = false
   private memorySnapshotInterval: number
   private memorySnapshotTimer: TimerHandle | null = null
-  private lastMemorySnapshot: { heapUsed: number; heapTotal: number; arrayBuffers: number } = {
+  private lastMemorySnapshot: {
+    heapUsed: number
+    heapTotal: number
+    arrayBuffers: number
+  } = {
     heapUsed: 0,
     heapTotal: 0,
     arrayBuffers: 0,
@@ -524,6 +560,8 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private renderTimeout: TimerHandle | null = null
   private lastTime: number = 0
   private frameCount: number = 0
+  // Bumped once per loop() iteration; see RenderContext.frameId.
+  private _frameId: number = 0
   private lastFpsTime: number = 0
   private currentFps: number = 0
   private targetFrameTime: number = 1000 / this._targetFps
@@ -603,7 +641,11 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private _capabilities: any | null = null
   private _latestPointer: { x: number; y: number } = { x: 0, y: 0 }
   private _hasPointer: boolean = false
-  private _lastPointerModifiers: RawMouseEvent["modifiers"] = { shift: false, alt: false, ctrl: false }
+  private _lastPointerModifiers: RawMouseEvent["modifiers"] = {
+    shift: false,
+    alt: false,
+    ctrl: false,
+  }
   private _currentMousePointerStyle: MousePointerStyle | undefined = undefined
 
   private _currentFocusedRenderable: Renderable | null = null
@@ -614,6 +656,10 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private _paletteDetectionPromise: Promise<TerminalColors> | null = null
   private _onDestroy?: () => void
   private _themeMode: ThemeMode | null = null
+  private _themeModeSource: "none" | "osc" | "csi" = "none"
+  private _themeFallbackPending: boolean = true
+  private _themeOscForeground: string | null = null
+  private _themeOscBackground: string | null = null
   private _terminalFocusState: boolean | null = null
 
   private sequenceHandlers: ((sequence: string) => boolean)[] = []
@@ -717,7 +763,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       "SIGBREAK", // Ctrl+Break on Windows
       "SIGPIPE", // Broken pipe
       "SIGBUS", // Bus error
-      "SIGFPE", // Floating point exception
     ]
 
     this.clipboard = new Clipboard(this.lib, this.rendererPtr)
@@ -755,7 +800,9 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     const useKittyForParsing = kittyConfig !== null
     this._keyHandler = new InternalKeyHandler()
     this._keyHandler.on("keypress", (event) => {
-      if (this.exitOnCtrlC && event.name === "c" && event.ctrl) {
+      // Use the shared matcher here too. Kitty can report a non-Latin
+      // character plus a base-layout `c`, and Ctrl+C should still exit.
+      if (this.exitOnCtrlC && matchesKeyBinding(event, { name: "c", ctrl: true })) {
         process.nextTick(() => {
           this.destroy()
         })
@@ -861,6 +908,12 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     return this._currentFocusedRenderable
   }
 
+  public get currentFocusedEditor(): EditBufferRenderable | null {
+    if (!this._currentFocusedRenderable) return null
+    if (!isEditBufferRenderable(this._currentFocusedRenderable)) return null
+    return this._currentFocusedRenderable
+  }
+
   private normalizeClockTime(now: number, fallback: number): number {
     if (Number.isFinite(now)) {
       return now
@@ -880,11 +933,21 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   public focusRenderable(renderable: Renderable) {
     if (this._currentFocusedRenderable === renderable) return
 
-    if (this._currentFocusedRenderable) {
-      this._currentFocusedRenderable.blur()
-    }
+    const prev = this.currentFocusedEditor
 
+    this._currentFocusedRenderable?.blur()
     this._currentFocusedRenderable = renderable
+
+    const next = this.currentFocusedEditor
+    if (prev !== next) {
+      this.emit(CliRenderEvents.FOCUSED_EDITOR, next, prev)
+    }
+  }
+
+  public blurRenderable(renderable: Renderable): void {
+    if (this._currentFocusedRenderable === renderable) {
+      this._currentFocusedRenderable = null
+    }
   }
 
   private setCapturedRenderable(renderable: Renderable | undefined): void {
@@ -915,6 +978,10 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   public get widthMethod(): WidthMethod {
     const caps = this.capabilities
     return caps?.unicode === "wcwidth" ? "wcwidth" : "unicode"
+  }
+
+  public get frameId(): number {
+    return this._frameId
   }
 
   private writeOut(chunk: any, encoding?: any, callback?: any): boolean {
@@ -1135,6 +1202,47 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   public get themeMode(): ThemeMode | null {
     return this._themeMode
+  }
+
+  public waitForThemeMode(timeoutMs: number = 1000): Promise<ThemeMode | null> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+      throw new Error("timeoutMs must be a non-negative finite number")
+    }
+
+    if (this._themeMode !== null || this._isDestroyed || timeoutMs === 0) {
+      return Promise.resolve(this._themeMode)
+    }
+
+    return new Promise<ThemeMode | null>((resolve) => {
+      let timeoutHandle: TimerHandle | null = null
+
+      const cleanup = () => {
+        if (timeoutHandle !== null) {
+          this.clock.clearTimeout(timeoutHandle)
+          timeoutHandle = null
+        }
+
+        this.off(CliRenderEvents.THEME_MODE, handleThemeMode)
+        this.off(CliRenderEvents.DESTROY, handleDestroy)
+      }
+
+      const finish = () => {
+        cleanup()
+        resolve(this._themeMode)
+      }
+
+      const handleThemeMode = () => {
+        finish()
+      }
+
+      const handleDestroy = () => {
+        finish()
+      }
+
+      this.on(CliRenderEvents.THEME_MODE, handleThemeMode)
+      this.on(CliRenderEvents.DESTROY, handleDestroy)
+      timeoutHandle = this.clock.setTimeout(finish, timeoutMs)
+    })
   }
 
   public getDebugInputs(): Array<{ timestamp: string; sequence: string }> {
@@ -1413,21 +1521,61 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   private themeModeHandler: (sequence: string) => boolean = ((sequence: string) => {
     if (sequence === "\x1b[?997;1n") {
-      if (this._themeMode !== "dark") {
-        this._themeMode = "dark"
-        this.emit(CliRenderEvents.THEME_MODE, "dark")
-      }
+      this.applyThemeMode("dark", "csi")
+      this._themeFallbackPending = false
       return true
     }
     if (sequence === "\x1b[?997;2n") {
-      if (this._themeMode !== "light") {
-        this._themeMode = "light"
-        this.emit(CliRenderEvents.THEME_MODE, "light")
-      }
+      this.applyThemeMode("light", "csi")
+      this._themeFallbackPending = false
       return true
     }
-    return false
+
+    let handledOscThemeResponse = false
+    let match: RegExpExecArray | null
+
+    OSC_THEME_RESPONSE.lastIndex = 0
+    while ((match = OSC_THEME_RESPONSE.exec(sequence))) {
+      handledOscThemeResponse = true
+      const color = oscThemeColorToHex(match[2], match[3], match[4], match[5])
+
+      if (match[1] === "10") {
+        this._themeOscForeground = color
+      } else {
+        this._themeOscBackground = color
+      }
+    }
+
+    if (!handledOscThemeResponse) {
+      return false
+    }
+
+    if (!this._themeFallbackPending) {
+      return true
+    }
+
+    if (this._themeOscForeground && this._themeOscBackground) {
+      this.applyThemeMode(inferThemeModeFromBackgroundColor(this._themeOscBackground), "osc")
+      this._themeFallbackPending = false
+    }
+
+    return true
   }).bind(this)
+
+  private applyThemeMode(mode: ThemeMode, source: "osc" | "csi"): void {
+    if (source === "osc" && this._themeModeSource === "csi") {
+      return
+    }
+
+    const changed = this._themeMode !== mode
+
+    this._themeMode = mode
+    this._themeModeSource = source
+
+    if (changed) {
+      this.emit(CliRenderEvents.THEME_MODE, mode)
+    }
+  }
 
   private dispatchSequenceHandlers(sequence: string): boolean {
     if (this._debugModeEnabled) {
@@ -1624,7 +1772,10 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       this.updateSelection(maybeRenderable, mouseEvent.x, mouseEvent.y)
 
       if (maybeRenderable) {
-        const event = new MouseEvent(maybeRenderable, { ...mouseEvent, isDragging: true })
+        const event = new MouseEvent(maybeRenderable, {
+          ...mouseEvent,
+          isDragging: true,
+        })
         maybeRenderable.processMouseEvent(event)
       }
 
@@ -1633,7 +1784,10 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
     if (mouseEvent.type === "up" && this.currentSelection?.isDragging) {
       if (maybeRenderable) {
-        const event = new MouseEvent(maybeRenderable, { ...mouseEvent, isDragging: true })
+        const event = new MouseEvent(maybeRenderable, {
+          ...mouseEvent,
+          isDragging: true,
+        })
         maybeRenderable.processMouseEvent(event)
       }
 
@@ -1655,7 +1809,10 @@ export class CliRenderer extends EventEmitter implements RenderContext {
         this.lastOverRenderable !== this.capturedRenderable &&
         !this.lastOverRenderable.isDestroyed
       ) {
-        const event = new MouseEvent(this.lastOverRenderable, { ...mouseEvent, type: "out" })
+        const event = new MouseEvent(this.lastOverRenderable, {
+          ...mouseEvent,
+          type: "out",
+        })
         this.lastOverRenderable.processMouseEvent(event)
       }
       this.lastOverRenderable = maybeRenderable
@@ -1676,7 +1833,10 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     }
 
     if (this.capturedRenderable && mouseEvent.type === "up") {
-      const event = new MouseEvent(this.capturedRenderable, { ...mouseEvent, type: "drag-end" })
+      const event = new MouseEvent(this.capturedRenderable, {
+        ...mouseEvent,
+        type: "drag-end",
+      })
       this.capturedRenderable.processMouseEvent(event)
       this.capturedRenderable.processMouseEvent(new MouseEvent(this.capturedRenderable, mouseEvent))
       if (maybeRenderable) {
@@ -1913,6 +2073,15 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   public setTerminalTitle(title: string): void {
     this.lib.setTerminalTitle(this.rendererPtr, title)
+  }
+
+  /**
+   * Reset the terminal background color to its default via OSC 111.
+   * Called automatically by destroy() and suspend(), but exposed for
+   * consumers that need explicit control (e.g. before SIGTSTP).
+   */
+  public resetTerminalBgColor(): void {
+    process.stdout.write("\x1b]111\x07")
   }
 
   public copyToClipboardOSC52(text: string, target?: ClipboardTarget): boolean {
@@ -2205,6 +2374,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       },
       true,
     )
+    this._useMouse = false
     this.setCapturedRenderable(undefined)
 
     this.stdin.removeListener("data", this.stdinListener)
@@ -2289,6 +2459,9 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       this.renderTimeout = null
     }
     try {
+      // Bump before any work so all callers this iteration see the new id.
+      this._frameId++
+
       const now = this.normalizeClockTime(this.clock.now(), this.lastTime)
       const elapsed = this.getElapsedMs(now, this.lastTime)
 

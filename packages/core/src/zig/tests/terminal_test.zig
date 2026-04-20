@@ -205,6 +205,10 @@ const TestWriter = struct {
         try self.buffer.appendSlice(self.allocator, data);
     }
 
+    pub fn writeByte(self: *TestWriter, byte: u8) !void {
+        try self.buffer.append(self.allocator, byte);
+    }
+
     pub fn print(self: *TestWriter, comptime fmt: []const u8, args: anytype) !void {
         try self.buffer.writer(self.allocator).print(fmt, args);
     }
@@ -233,8 +237,14 @@ test "queryTerminalSend - sends unwrapped queries when not in tmux" {
 
     const output = writer.getWritten();
 
+    const idx_color_scheme_request = std.mem.indexOf(u8, output, ansi.ANSI.colorSchemeRequest).?;
+    const idx_osc_theme_queries = std.mem.indexOf(u8, output, ansi.ANSI.oscThemeQueries).?;
+    const idx_xtversion = std.mem.indexOf(u8, output, "\x1b[>0q").?;
+
     // Should contain xtversion
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[>0q") != null);
+    try testing.expect(idx_color_scheme_request < idx_xtversion);
+    try testing.expect(idx_osc_theme_queries < idx_xtversion);
 
     // Should contain unwrapped DECRQM queries (single ESC)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?1016$p") != null);
@@ -246,6 +256,7 @@ test "queryTerminalSend - sends unwrapped queries when not in tmux" {
 
     // Should mark capability queries as pending
     try testing.expect(term.capability_queries_pending);
+    try testing.expect(term.theme_queries_pending);
 }
 
 test "queryTerminalSend - sends DCS wrapped queries when in tmux" {
@@ -264,8 +275,14 @@ test "queryTerminalSend - sends DCS wrapped queries when in tmux" {
 
     const output = writer.getWritten();
 
+    const idx_color_scheme_request = std.mem.indexOf(u8, output, ansi.ANSI.colorSchemeRequest).?;
+    const idx_osc_theme_queries = std.mem.indexOf(u8, output, ansi.ANSI.oscThemeQueriesTmux).?;
+    const idx_xtversion = std.mem.indexOf(u8, output, "\x1b[>0q").?;
+
     // Should contain xtversion (unwrapped - used for detection)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[>0q") != null);
+    try testing.expect(idx_color_scheme_request < idx_xtversion);
+    try testing.expect(idx_osc_theme_queries < idx_xtversion);
 
     // Should contain tmux DCS wrapper start and doubled ESC for queries
     // wrapForTmux wraps all queries together with one DCS envelope
@@ -273,6 +290,7 @@ test "queryTerminalSend - sends DCS wrapped queries when in tmux" {
 
     // Should NOT mark capability queries as pending (already sent wrapped)
     try testing.expect(!term.capability_queries_pending);
+    try testing.expect(!term.theme_queries_pending);
 }
 
 test "sendPendingQueries - sends wrapped queries after tmux detected via xtversion" {
@@ -690,6 +708,48 @@ test "queryTerminalSend - sends OSC 66 queries when OPENTUI_FORCE_EXPLICIT_WIDTH
     try testing.expect(!term.skip_explicit_width_query);
 }
 
+test "enableDetectedFeatures - sends initial theme queries" {
+    var env = std.process.EnvMap.init(testing.allocator);
+    defer env.deinit();
+
+    var term = Terminal.init(.{ .env_map = &env });
+    var writer = TestWriter.init(testing.allocator);
+    defer writer.deinit();
+
+    try term.enableDetectedFeatures(&writer, false);
+
+    const output = writer.getWritten();
+
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.colorSchemeSet) != null);
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.colorSchemeRequest) != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]10;?\x07") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]11;?\x07") != null);
+    try testing.expect(term.theme_queries_pending);
+    try testing.expect(term.state.theme_queries_sent);
+}
+
+test "sendPendingQueries - sends wrapped OSC theme queries after tmux detected via xtversion" {
+    var term = Terminal.init(.{});
+    term.in_tmux = false;
+    term.theme_queries_pending = true;
+
+    term.term_info.from_xtversion = true;
+    term.term_info.name_len = 4;
+    @memcpy(term.term_info.name[0..4], "tmux");
+
+    var writer = TestWriter.init(testing.allocator);
+    defer writer.deinit();
+
+    const did_send = try term.sendPendingQueries(&writer);
+
+    try testing.expect(did_send);
+
+    const output = writer.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\x1bPtmux;\x1b\x1b]10;?\x07") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b\x1b]11;?\x07") != null);
+    try testing.expect(!term.theme_queries_pending);
+}
+
 test "setMouseMode - enable without movement keeps click/drag only" {
     var term = Terminal.init(.{});
     var writer = TestWriter.init(testing.allocator);
@@ -751,4 +811,41 @@ test "restoreTerminalModes - respects mouse movement setting" {
     try testing.expect(idx_enable_mouse < idx_enable_button);
     try testing.expect(idx_enable_button < idx_enable_sgr);
     try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.enableAnyEventTracking) == null);
+}
+
+test "resetState - force-disables mouse when cleanup is pending and state drifted false" {
+    var term = Terminal.init(.{});
+    term.state.mouse = false;
+    term.state.mouse_movement = false;
+    term.state.mouse_was_enabled = true;
+
+    var writer = TestWriter.init(testing.allocator);
+    defer writer.deinit();
+
+    try term.resetState(&writer);
+
+    const output = writer.getWritten();
+    const idx_disable_any = std.mem.indexOf(u8, output, ansi.ANSI.disableAnyEventTracking).?;
+    const idx_disable_button = std.mem.indexOf(u8, output, ansi.ANSI.disableButtonEventTracking).?;
+    const idx_disable_mouse = std.mem.indexOf(u8, output, ansi.ANSI.disableMouseTracking).?;
+    const idx_disable_sgr = std.mem.indexOf(u8, output, ansi.ANSI.disableSGRMouseMode).?;
+    try testing.expect(idx_disable_any < idx_disable_button);
+    try testing.expect(idx_disable_button < idx_disable_mouse);
+    try testing.expect(idx_disable_mouse < idx_disable_sgr);
+    try testing.expect(!term.state.mouse);
+}
+
+test "resetState - skips mouse disable when mouse was never enabled" {
+    var term = Terminal.init(.{});
+
+    var writer = TestWriter.init(testing.allocator);
+    defer writer.deinit();
+
+    try term.resetState(&writer);
+
+    const output = writer.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.disableAnyEventTracking) == null);
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.disableButtonEventTracking) == null);
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.disableMouseTracking) == null);
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.disableSGRMouseMode) == null);
 }

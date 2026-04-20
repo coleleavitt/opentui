@@ -106,6 +106,7 @@ skip_graphics_query: bool = false,
 skip_explicit_width_query: bool = false,
 graphics_query_pending: bool = false,
 capability_queries_pending: bool = false,
+theme_queries_pending: bool = false,
 
 state: struct {
     alt_screen: bool = false,
@@ -114,8 +115,10 @@ state: struct {
     bracketed_paste: bool = false,
     mouse: bool = false,
     mouse_movement: bool = true,
+    mouse_was_enabled: bool = false,
     pixel_mouse: bool = false,
     color_scheme_updates: bool = false,
+    theme_queries_sent: bool = false,
     focus_tracking: bool = false,
     modify_other_keys: bool = false,
     mouse_pointer: MousePointerStyle = .default,
@@ -175,8 +178,8 @@ pub fn resetState(self: *Terminal, tty: anytype) !void {
         try self.setModifyOtherKeys(tty, false);
     }
 
-    if (self.state.mouse) {
-        try self.setMouseMode(tty, false, self.state.mouse_movement);
+    if (self.state.mouse_was_enabled) {
+        try self.forceDisableMouseMode(tty);
     }
 
     if (self.state.bracketed_paste) {
@@ -208,6 +211,9 @@ pub fn resetState(self: *Terminal, tty: anytype) !void {
     }
 
     self.setTerminalTitle(tty, "");
+
+    // OSC 111 - reset terminal background color to its default
+    try tty.writeAll(ansi.ANSI.resetTerminalBgColor);
 }
 
 pub fn enterAltScreen(self: *Terminal, tty: anytype) !void {
@@ -224,6 +230,18 @@ pub fn queryTerminalSend(self: *Terminal, tty: anytype) !void {
     self.checkEnvironmentOverrides();
     self.graphics_query_pending = !self.skip_graphics_query;
     self.capability_queries_pending = false;
+    self.theme_queries_pending = false;
+
+    try self.setColorSchemeUpdates(tty, true);
+    try tty.writeAll(ansi.ANSI.colorSchemeRequest);
+
+    if (self.in_tmux) {
+        try tty.writeAll(ansi.ANSI.oscThemeQueriesTmux);
+    } else {
+        try tty.writeAll(ansi.ANSI.oscThemeQueries);
+        self.theme_queries_pending = true;
+    }
+    self.state.theme_queries_sent = true;
 
     // Send xtversion first (doesn't need DCS wrapping - used for tmux detection)
     try tty.writeAll(ansi.ANSI.xtversion ++
@@ -274,6 +292,14 @@ pub fn sendPendingQueries(self: *Terminal, tty: anytype) !bool {
         sent = true;
     }
 
+    if (self.theme_queries_pending) {
+        if (self.term_info.from_xtversion and is_tmux) {
+            try tty.writeAll(ansi.ANSI.oscThemeQueriesTmux);
+            sent = true;
+        }
+        self.theme_queries_pending = false;
+    }
+
     return sent;
 }
 
@@ -309,9 +335,22 @@ pub fn enableDetectedFeatures(self: *Terminal, tty: anytype, use_kitty_keyboard:
         try self.setFocusTracking(tty, true);
     }
 
+    const is_tmux = self.in_tmux or self.isXtversionTmux();
+
     if (!self.state.color_scheme_updates) {
         try self.setColorSchemeUpdates(tty, true);
         try tty.writeAll(ansi.ANSI.colorSchemeRequest);
+    }
+
+    if (!self.state.theme_queries_sent) {
+        if (is_tmux) {
+            try tty.writeAll(ansi.ANSI.oscThemeQueriesTmux);
+            self.theme_queries_pending = false;
+        } else {
+            try tty.writeAll(ansi.ANSI.oscThemeQueries);
+            self.theme_queries_pending = true;
+        }
+        self.state.theme_queries_sent = true;
     }
 }
 
@@ -497,6 +536,13 @@ fn checkEnvironmentOverrides(self: *Terminal) void {
     }
 }
 
+fn writeMouseDisableSequences(tty: anytype) !void {
+    try tty.writeAll(ansi.ANSI.disableAnyEventTracking);
+    try tty.writeAll(ansi.ANSI.disableButtonEventTracking);
+    try tty.writeAll(ansi.ANSI.disableMouseTracking);
+    try tty.writeAll(ansi.ANSI.disableSGRMouseMode);
+}
+
 // TODO: Allow pixel mouse mode to be enabled,
 // currently does not make sense and is not supported by higher levels
 pub fn setMouseMode(self: *Terminal, tty: anytype, enable: bool, enable_movement: bool) !void {
@@ -509,6 +555,9 @@ pub fn setMouseMode(self: *Terminal, tty: anytype, enable: bool, enable_movement
     if (enable) {
         self.state.mouse = true;
         self.state.mouse_movement = enable_movement;
+        // Arms the shutdown cleanup path so resetState() will still emit mouse
+        // disable sequences even if a later best-effort disable silently fails.
+        self.state.mouse_was_enabled = true;
         if (!enable_movement) {
             // Some terminals treat ?1000/?1002/?1003 as one family and let the
             // last sequence win. Reset any-event tracking first, then enable
@@ -524,11 +573,16 @@ pub fn setMouseMode(self: *Terminal, tty: anytype, enable: bool, enable_movement
     } else {
         self.state.mouse = false;
         self.state.pixel_mouse = false;
-        try tty.writeAll(ansi.ANSI.disableAnyEventTracking);
-        try tty.writeAll(ansi.ANSI.disableButtonEventTracking);
-        try tty.writeAll(ansi.ANSI.disableMouseTracking);
-        try tty.writeAll(ansi.ANSI.disableSGRMouseMode);
+        try writeMouseDisableSequences(tty);
     }
+}
+
+// Best-effort shutdown path: emit the reset sequences even if tracked state
+// already drifted to false because earlier writes failed.
+pub fn forceDisableMouseMode(self: *Terminal, tty: anytype) !void {
+    self.state.mouse = false;
+    self.state.pixel_mouse = false;
+    try writeMouseDisableSequences(tty);
 }
 
 pub fn setBracketedPaste(self: *Terminal, tty: anytype, enable: bool) !void {

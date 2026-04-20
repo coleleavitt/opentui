@@ -329,6 +329,35 @@ function parsePositiveDecimalPrefix(sequence: Uint8Array, start: number, endExcl
   return sawDigit ? value : null
 }
 
+// Returns the leading kitty codepoint from field 1, like `97` in `97:65`.
+// The CSI scanner uses this at `;` boundaries to recognize alternate-key
+// forms (`codepoint[:shifted[:base]]`). That keeps split kitty sequences
+// pending, instead of flushing them as unknown on timeout.
+function parseKittyFirstFieldCodepoint(sequence: Uint8Array, start: number, endExclusive: number): number | null {
+  if (start >= endExclusive) return null
+
+  let firstColon = -1
+  for (let index = start; index < endExclusive; index += 1) {
+    if (sequence[index] === 0x3a) {
+      firstColon = index
+      break
+    }
+  }
+
+  if (firstColon === -1) return null
+
+  const codepoint = parsePositiveDecimalPrefix(sequence, start, firstColon)
+  if (codepoint === null) return null
+
+  // Remaining bytes in field 1 must stay kitty-compatible: digits or colons.
+  for (let index = firstColon + 1; index < endExclusive; index += 1) {
+    const byte = sequence[index]!
+    if (byte !== 0x3a && !isAsciiDigit(byte)) return null
+  }
+
+  return codepoint
+}
+
 function canStillBeKittyU(state: ParametricCsiLike): boolean {
   return state.semicolons >= 1
 }
@@ -405,6 +434,7 @@ function canCompleteDeferredPrivateReplyCsi(
   if (!context.privateCapabilityRepliesActive) return false
   if (state.sawDollar) return state.hasDigit && byte === 0x79
   if (byte === 0x63) return state.hasDigit || state.semicolons > 0
+  if (byte === 0x6e) return state.hasDigit
   return state.hasDigit && byte === 0x75
 }
 
@@ -997,7 +1027,14 @@ export class StdinParser {
           }
 
           if (byte === 0x3b) {
-            const firstParamValue = parsePositiveDecimalPrefix(bytes, this.unitStart + 2, this.cursor)
+            const firstParamStart = this.unitStart + 2
+            const firstParamEnd = this.cursor
+            let firstParamValue = parsePositiveDecimalPrefix(bytes, firstParamStart, firstParamEnd)
+
+            if (firstParamValue === null && this.protocolContext.kittyKeyboardEnabled) {
+              firstParamValue = parseKittyFirstFieldCodepoint(bytes, firstParamStart, firstParamEnd)
+            }
+
             if (firstParamValue !== null) {
               this.cursor += 1
               this.state = {
@@ -1305,7 +1342,7 @@ export class StdinParser {
 
           if (byte >= 0x40 && byte <= 0x7e) {
             const end = this.cursor + 1
-            this.emitKeyOrResponse("csi", decodeUtf8(bytes.subarray(this.unitStart, end)))
+            this.emitOpaqueResponse("csi", bytes.subarray(this.unitStart, end))
             this.state = { tag: "ground" }
             this.consumePrefix(end)
             continue

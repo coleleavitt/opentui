@@ -3,6 +3,7 @@ import type { EventEmitter } from "events"
 import type { Selection } from "./lib/selection.js"
 import type { Renderable } from "./Renderable.js"
 import type { InternalKeyHandler, KeyHandler } from "./lib/KeyHandler.js"
+import type { EditBufferRenderable } from "./renderables/EditBufferRenderable.js"
 
 export const TextAttributes = {
   NONE: 0,
@@ -61,6 +62,7 @@ export interface RendererEvents {
   key: (data: Buffer) => void
   "memory:snapshot": (snapshot: { heapUsed: number; heapTotal: number; arrayBuffers: number }) => void
   selection: (selection: Selection) => void
+  focused_editor: (current: EditBufferRenderable | null, previous: EditBufferRenderable | null) => void
   "debugOverlay:toggle": (enabled: boolean) => void
   theme_mode: (mode: ThemeMode) => void
 }
@@ -72,6 +74,8 @@ export interface RenderContext extends EventEmitter {
   clearHitGridScissorRects: () => void
   width: number
   height: number
+  /** Monotonic, bumped once per `loop()` iteration. Lets renderables dedupe per-frame work. */
+  frameId: number
   requestRender: () => void
   setCursorPosition: (x: number, y: number, visible: boolean) => void
   setCursorStyle: (options: CursorStyleOptions) => void
@@ -85,7 +89,9 @@ export interface RenderContext extends EventEmitter {
   getSelection: () => Selection | null
   requestSelectionUpdate: () => void
   currentFocusedRenderable: Renderable | null
+  currentFocusedEditor: EditBufferRenderable | null
   focusRenderable: (renderable: Renderable) => void
+  blurRenderable: (renderable: Renderable) => void
   registerLifecyclePass: (renderable: Renderable) => void
   unregisterLifecyclePass: (renderable: Renderable) => void
   getLifecyclePasses: () => Set<Renderable>
