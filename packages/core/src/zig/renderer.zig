@@ -1039,6 +1039,8 @@ pub const CliRenderer = struct {
     ) void {
         var currentFg: ?RGBA = null;
         var currentBg: ?RGBA = null;
+        var currentFgTag: ?ansi.ColorTag = null;
+        var currentBgTag: ?ansi.ColorTag = null;
         var currentAttributes: i32 = -1;
         var currentLinkId: u32 = 0;
         var utf8Buf: [4]u8 = undefined;
@@ -1055,8 +1057,8 @@ pub const CliRenderer = struct {
                 const x = @as(u32, @intCast(ux));
                 const cell = snapshot.get(x, y) orelse continue;
 
-                const fgMatch = currentFg != null and buf.rgbaEqual(currentFg.?, cell.fg, colorEpsilon);
-                const bgMatch = currentBg != null and buf.rgbaEqual(currentBg.?, cell.bg, colorEpsilon);
+                const fgMatch = currentFg != null and currentFgTag != null and currentFgTag.? == cell.fg_tag and buf.rgbaEqual(currentFg.?, cell.fg, colorEpsilon);
+                const bgMatch = currentBg != null and currentBgTag != null and currentBgTag.? == cell.bg_tag and buf.rgbaEqual(currentBg.?, cell.bg, colorEpsilon);
                 const sameAttributes = fgMatch and bgMatch and @as(i32, @intCast(cell.attributes)) == currentAttributes;
 
                 const linkId = if (hyperlinksEnabled) ansi.TextAttributes.getLinkId(cell.attributes) else 0;
@@ -1080,23 +1082,12 @@ pub const CliRenderer = struct {
 
                     currentFg = cell.fg;
                     currentBg = cell.bg;
+                    currentFgTag = cell.fg_tag;
+                    currentBgTag = cell.bg_tag;
                     currentAttributes = @as(i32, @intCast(cell.attributes));
 
-                    const fgR = ansi.rgbaComponentToU8(cell.fg[0]);
-                    const fgG = ansi.rgbaComponentToU8(cell.fg[1]);
-                    const fgB = ansi.rgbaComponentToU8(cell.fg[2]);
-
-                    const bgR = ansi.rgbaComponentToU8(cell.bg[0]);
-                    const bgG = ansi.rgbaComponentToU8(cell.bg[1]);
-                    const bgB = ansi.rgbaComponentToU8(cell.bg[2]);
-                    const bgA = cell.bg[3];
-
-                    ansi.ANSI.fgColorOutput(writer, fgR, fgG, fgB) catch {};
-                    if (bgA < 0.001) {
-                        writer.writeAll("\x1b[49m") catch {};
-                    } else {
-                        ansi.ANSI.bgColorOutput(writer, bgR, bgG, bgB) catch {};
-                    }
+                    self.emitColor(writer, cell.fg, cell.fg_tag, false);
+                    self.emitColor(writer, cell.bg, cell.bg_tag, true);
 
                     ansi.TextAttributes.applyAttributesOutputWriter(writer, cell.attributes) catch {};
                 }
@@ -1138,6 +1129,11 @@ pub const CliRenderer = struct {
             writer.writeAll(ansi.ANSI.reset) catch {};
             // Guarantee short rows do not leave stale content from prior frame data.
             writer.writeAll(ansi.ANSI.eraseToEndOfLine) catch {};
+            currentFg = null;
+            currentBg = null;
+            currentFgTag = null;
+            currentBgTag = null;
+            currentAttributes = -1;
 
             const is_last_row = @as(u32, @intCast(uy + 1)) >= snapshot.height;
             if (!is_last_row or trailing_newline) {
@@ -1150,10 +1146,6 @@ pub const CliRenderer = struct {
                 writer.writeAll(ansi.ANSI.reset) catch {};
                 writer.writeAll(ansi.ANSI.eraseToEndOfLine) catch {};
             }
-
-            currentFg = null;
-            currentBg = null;
-            currentAttributes = -1;
         }
     }
 

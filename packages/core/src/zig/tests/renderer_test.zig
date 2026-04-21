@@ -1744,6 +1744,63 @@ test "renderer - commitSplitFooterSnapshot appends styled snapshot before footer
     try std.testing.expect(footer_clear_index == null);
 }
 
+test "renderer - commitSplitFooterSnapshot preserves indexed and default color tags" {
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+    var local_link_pool = link.LinkPool.init(std.testing.allocator);
+    defer local_link_pool.deinit();
+
+    var cli_renderer = try CliRenderer.create(
+        std.testing.allocator,
+        8,
+        4,
+        pool,
+        true,
+    );
+    defer cli_renderer.destroy();
+
+    cli_renderer.terminal.caps.rgb = true;
+    cli_renderer.terminal.caps.ansi256 = true;
+
+    _ = cli_renderer.resetSplitScrollback(2, 2);
+
+    var snapshot = try OptimizedBuffer.init(
+        std.testing.allocator,
+        2,
+        1,
+        .{ .pool = pool, .width_method = .unicode, .respectAlpha = false },
+    );
+    defer snapshot.deinit();
+
+    try snapshot.clear(.{ 0.0, 0.0, 0.0, 0.0 }, 0);
+    snapshot.set(0, 0, buffer.Cell{
+        .char = 'A',
+        .fg = RGBA{ 1.0, 1.0, 1.0, 1.0 },
+        .bg = RGBA{ 0.0, 0.0, 0.0, 1.0 },
+        .fg_tag = ansi.COLOR_TAG_DEFAULT,
+        .bg_tag = ansi.COLOR_TAG_RGB,
+        .attributes = 0,
+    });
+    snapshot.set(1, 0, buffer.Cell{
+        .char = 'B',
+        .fg = RGBA{ 0.2, 0.4, 0.6, 1.0 },
+        .bg = RGBA{ 0.0, 0.0, 0.0, 1.0 },
+        .fg_tag = ansi.indexedColorTag(6),
+        .bg_tag = ansi.COLOR_TAG_DEFAULT,
+        .attributes = 0,
+    });
+
+    _ = cli_renderer.commitSplitFooterSnapshotBatched(snapshot, 2, true, false, 2, false, true, true);
+
+    const output = cli_renderer.getLastOutputForTest();
+    try std.testing.expect(std.mem.indexOf(u8, output, "A") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "B") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[39m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[38;5;6m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[49m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[38;2;51;102;153m") == null);
+}
+
 test "renderer - commitSplitFooterSnapshot does not emit NUL padding for short rows" {
     const pool = gp.initGlobalPool(std.testing.allocator);
     defer gp.deinitGlobalPool();
