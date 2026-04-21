@@ -1903,6 +1903,7 @@ export interface RenderLib {
   onceNativeEvent: (name: string, handler: (data: ArrayBuffer) => void) => void
   offNativeEvent: (name: string, handler: (data: ArrayBuffer) => void) => void
   onAnyNativeEvent: (handler: (name: string, data: ArrayBuffer) => void) => void
+  dispose: () => void
 }
 
 class FFIRenderLib implements RenderLib {
@@ -3980,6 +3981,18 @@ class FFIRenderLib implements RenderLib {
 
   public onAnyNativeEvent(handler: (name: string, data: ArrayBuffer) => void): void {
     this._anyEventHandlers.push(handler)
+  }
+
+  public dispose(): void {
+    if (!this.logCallbackWrapper) return
+    this.opentui.symbols.setLogCallback(0 as Pointer)
+    this.opentui.symbols.setEventCallback(0 as Pointer)
+    this.logCallbackWrapper.close()
+    this.eventCallbackWrapper.close()
+    this.nativeSpanFeedCallbackWrapper?.close()
+    this.logCallbackWrapper = null
+    this.eventCallbackWrapper = null
+    this.nativeSpanFeedCallbackWrapper = null
   }
 }
 

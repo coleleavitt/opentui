@@ -624,6 +624,7 @@ const rendererTracker = singleton("RendererTracker", () => {
         }
       }
     },
+    hasRenderers: () => renderers.size > 0,
   }
 })
 
@@ -3690,6 +3691,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
     this.lib.destroyRenderer(this.rendererPtr)
     rendererTracker.removeRenderer(this)
+    if (!rendererTracker.hasRenderers()) this.lib.dispose()
 
     if (this._onDestroy) {
       try {
