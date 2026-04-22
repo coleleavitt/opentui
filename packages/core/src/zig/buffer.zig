@@ -419,7 +419,8 @@ pub const OptimizedBuffer = struct {
     }
 
     fn coordsToIndex(self: *const OptimizedBuffer, x: u32, y: u32) u32 {
-        return y * self.width + x;
+        const idx_u64 = @as(u64, y) * @as(u64, self.width) + @as(u64, x);
+        return std.math.cast(u32, idx_u64) orelse std.math.maxInt(u32);
     }
 
     fn indexToCoords(self: *const OptimizedBuffer, index: u32) struct { x: u32, y: u32 } {
@@ -2034,12 +2035,12 @@ pub const OptimizedBuffer = struct {
                     continue;
                 }
 
-                const renderX: u32 = (x_cell - posX) * 2;
-                const renderY: u32 = (y_cell - posY) * 2;
+                const renderX: u64 = @as(u64, x_cell - posX) * 2;
+                const renderY: u64 = @as(u64, y_cell - posY) * 2;
 
-                const tlIndex: usize = @intCast(renderY * alignedBytesPerRow + renderX * bytesPerPixel);
+                const tlIndex: usize = @intCast(renderY * @as(u64, alignedBytesPerRow) + renderX * bytesPerPixel);
                 const trIndex: usize = tlIndex + bytesPerPixel;
-                const blIndex: usize = @intCast((renderY + 1) * alignedBytesPerRow + renderX * bytesPerPixel);
+                const blIndex: usize = @intCast((renderY + 1) * @as(u64, alignedBytesPerRow) + renderX * bytesPerPixel);
                 const brIndex: usize = blIndex + bytesPerPixel;
 
                 const indices = [_]usize{ tlIndex, trIndex, blIndex, brIndex };

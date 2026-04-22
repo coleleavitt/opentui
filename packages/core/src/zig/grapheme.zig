@@ -301,8 +301,10 @@ pub const GraphemePool = struct {
         }
 
         pub fn allocInternal(self: *ClassPool, bytes: []const u8, is_owned: bool) GraphemePoolError!u32 {
-            // Validate size for owned allocations
             if (is_owned and bytes.len > self.slot_capacity) {
+                return GraphemePoolError.GraphemeTooLarge;
+            }
+            if (!is_owned and bytes.len > std.math.maxInt(u16)) {
                 return GraphemePoolError.GraphemeTooLarge;
             }
 
@@ -312,10 +314,8 @@ pub const GraphemePool = struct {
             const p = self.slotPtr(slot_index);
             const header_ptr = @as(*SlotHeader, @ptrCast(@alignCast(p)));
 
-            // Increment generation when reusing a slot, wrapping at 7 bits (128 values)
             const new_generation = (header_ptr.generation + 1) & GENERATION_MASK;
 
-            // Calculate length based on ownership
             const len: u16 = if (is_owned) @intCast(@min(bytes.len, self.slot_capacity)) else @intCast(bytes.len);
 
             header_ptr.* = .{

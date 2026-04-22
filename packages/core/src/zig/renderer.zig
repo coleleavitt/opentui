@@ -1017,7 +1017,11 @@ pub const CliRenderer = struct {
                     // spaces, or wide graphemes become one extra column wider in
                     // terminal output and table rows can autowrap unexpectedly.
                 } else {
-                    const len = std.unicode.utf8Encode(@intCast(cell.char), &utf8Buf) catch 1;
+                    const codepoint = std.math.cast(u21, cell.char) orelse {
+                        writer.writeByte(' ') catch {};
+                        continue;
+                    };
+                    const len = std.unicode.utf8Encode(codepoint, &utf8Buf) catch 1;
                     writer.writeAll(utf8Buf[0..len]) catch {};
                 }
             }
@@ -1312,9 +1316,11 @@ pub const CliRenderer = struct {
                     // cells have distinct colors (space overwrite can break glyph output)
 
                     // writer.writeByte(' ') catch {};
-                } else {
-                    const len = std.unicode.utf8Encode(@intCast(cell.char), &utf8Buf) catch 1;
+                } else if (std.math.cast(u21, cell.char)) |codepoint| {
+                    const len = std.unicode.utf8Encode(codepoint, &utf8Buf) catch 1;
                     writer.writeAll(utf8Buf[0..len]) catch {};
+                } else {
+                    writer.writeByte(' ') catch {};
                 }
                 runLength += 1;
 
