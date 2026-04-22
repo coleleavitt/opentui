@@ -4,6 +4,7 @@ pub const GraphemePoolError = error{
     OutOfMemory,
     InvalidId,
     WrongGeneration,
+    GraphemeTooLarge,
 };
 
 // Encoding flags for char buffer entries (u32)
@@ -302,7 +303,7 @@ pub const GraphemePool = struct {
         pub fn allocInternal(self: *ClassPool, bytes: []const u8, is_owned: bool) GraphemePoolError!u32 {
             // Validate size for owned allocations
             if (is_owned and bytes.len > self.slot_capacity) {
-                @panic("ClassPool.allocInternal: bytes.len > slot_capacity");
+                return GraphemePoolError.GraphemeTooLarge;
             }
 
             if (self.free_list.items.len == 0) try self.grow();
