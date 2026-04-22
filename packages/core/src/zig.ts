@@ -1968,6 +1968,7 @@ class FFIRenderLib implements RenderLib {
     )
 
     this.logCallbackWrapper = logCallback
+    pinFfiCallback(logCallback)
 
     if (!logCallback.ptr) {
       throw new Error("Failed to create log callback")
@@ -2024,6 +2025,7 @@ class FFIRenderLib implements RenderLib {
     )
 
     this.eventCallbackWrapper = eventCallback
+    pinFfiCallback(eventCallback)
 
     if (!eventCallback.ptr) {
       throw new Error("Failed to create event callback")
@@ -2051,6 +2053,7 @@ class FFIRenderLib implements RenderLib {
     )
 
     this.nativeSpanFeedCallbackWrapper = callback
+    pinFfiCallback(callback)
 
     if (!callback.ptr) {
       throw new Error("Failed to create native span feed callback")
@@ -3987,13 +3990,18 @@ class FFIRenderLib implements RenderLib {
     if (!this.logCallbackWrapper) return
     this.opentui.symbols.setLogCallback(0 as Pointer)
     this.opentui.symbols.setEventCallback(0 as Pointer)
-    this.logCallbackWrapper.close()
-    this.eventCallbackWrapper.close()
-    this.nativeSpanFeedCallbackWrapper?.close()
+    pinFfiCallback(this.logCallbackWrapper)
+    pinFfiCallback(this.eventCallbackWrapper)
+    if (this.nativeSpanFeedCallbackWrapper) pinFfiCallback(this.nativeSpanFeedCallbackWrapper)
     this.logCallbackWrapper = null
     this.eventCallbackWrapper = null
     this.nativeSpanFeedCallbackWrapper = null
   }
+}
+
+const pinnedFfiCallbacks = new Set<unknown>()
+function pinFfiCallback(cb: unknown) {
+  pinnedFfiCallbacks.add(cb)
 }
 
 let opentuiLibPath: string | undefined

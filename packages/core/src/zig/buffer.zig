@@ -418,9 +418,11 @@ pub const OptimizedBuffer = struct {
         try self.clear(.{ 0.0, 0.0, 0.0, 1.0 }, null);
     }
 
-    fn coordsToIndex(self: *const OptimizedBuffer, x: u32, y: u32) u32 {
+    fn coordsToIndex(self: *const OptimizedBuffer, x: u32, y: u32) ?u32 {
         const idx_u64 = @as(u64, y) * @as(u64, self.width) + @as(u64, x);
-        return std.math.cast(u32, idx_u64) orelse std.math.maxInt(u32);
+        const idx = std.math.cast(u32, idx_u64) orelse return null;
+        if (idx >= self.buffer.char.len) return null;
+        return idx;
     }
 
     fn indexToCoords(self: *const OptimizedBuffer, index: u32) struct { x: u32, y: u32 } {
@@ -624,9 +626,7 @@ pub const OptimizedBuffer = struct {
     }
 
     pub fn get(self: *const OptimizedBuffer, x: u32, y: u32) ?Cell {
-        if (x >= self.width or y >= self.height) return null;
-
-        const index = self.coordsToIndex(x, y);
+        const index = self.coordsToIndex(x, y) orelse return null;
         return Cell{
             .char = self.buffer.char[index],
             .fg = self.buffer.fg[index],
@@ -968,8 +968,9 @@ pub const OptimizedBuffer = struct {
             // For non-alpha (fully opaque) backgrounds with no graphemes or links, we can do direct filling
             var fillY = clippedStartY;
             while (fillY <= clippedEndY) : (fillY += 1) {
-                const rowStartIndex = self.coordsToIndex(@intCast(clippedStartX), @intCast(fillY));
+                const rowStartIndex = self.coordsToIndex(@intCast(clippedStartX), @intCast(fillY)) orelse continue;
                 const rowWidth = clippedEndX - clippedStartX + 1;
+                if (rowStartIndex + rowWidth > self.buffer.char.len) continue;
 
                 const rowSliceChar = self.buffer.char[rowStartIndex .. rowStartIndex + rowWidth];
                 const rowSliceFg = self.buffer.fg[rowStartIndex .. rowStartIndex + rowWidth];
@@ -1163,9 +1164,11 @@ pub const OptimizedBuffer = struct {
 
                 if (sX >= frameBuffer.width) continue;
 
-                const destRowStart = self.coordsToIndex(@intCast(clippedStartX), @intCast(dY));
-                const srcRowStart = frameBuffer.coordsToIndex(sX, sY);
+                const destRowStart = self.coordsToIndex(@intCast(clippedStartX), @intCast(dY)) orelse continue;
+                const srcRowStart = frameBuffer.coordsToIndex(sX, sY) orelse continue;
                 const actualCopyWidth = @min(@as(u32, @intCast(clippedEndX - clippedStartX + 1)), frameBuffer.width - sX);
+                if (destRowStart + actualCopyWidth > self.buffer.char.len) continue;
+                if (srcRowStart + actualCopyWidth > frameBuffer.buffer.char.len) continue;
 
                 @memcpy(self.buffer.char[destRowStart .. destRowStart + actualCopyWidth], frameBuffer.buffer.char[srcRowStart .. srcRowStart + actualCopyWidth]);
                 @memcpy(self.buffer.fg[destRowStart .. destRowStart + actualCopyWidth], frameBuffer.buffer.fg[srcRowStart .. srcRowStart + actualCopyWidth]);
@@ -1188,8 +1191,7 @@ pub const OptimizedBuffer = struct {
 
                 if (sX >= frameBuffer.width or sY >= frameBuffer.height) continue;
 
-                const srcIndex = frameBuffer.coordsToIndex(sX, sY);
-                if (srcIndex >= frameBuffer.buffer.char.len) continue;
+                const srcIndex = frameBuffer.coordsToIndex(sX, sY) orelse continue;
 
                 const srcChar = frameBuffer.buffer.char[srcIndex];
                 const srcFg = frameBuffer.buffer.fg[srcIndex];
@@ -1553,9 +1555,10 @@ pub const OptimizedBuffer = struct {
                             const fg = if (tab_col == 0 and tab_indicator_color != null) tab_indicator_color.? else drawFg;
 
                             if (useTransparentTextFastPath) {
-                                const index = self.coordsToIndex(@intCast(currentX + @as(i32, @intCast(tab_col))), @intCast(currentY));
-                                if (self.trySetTransparentTextCellFast(index, char, fg, drawAttributes)) {
-                                    continue;
+                                if (self.coordsToIndex(@intCast(currentX + @as(i32, @intCast(tab_col))), @intCast(currentY))) |index| {
+                                    if (self.trySetTransparentTextCellFast(index, char, fg, drawAttributes)) {
+                                        continue;
+                                    }
                                 }
                             }
 
@@ -1584,13 +1587,14 @@ pub const OptimizedBuffer = struct {
                         }
 
                         if (useTransparentTextFastPath) {
-                            const index = self.coordsToIndex(@intCast(currentX), @intCast(currentY));
-                            if (self.trySetTransparentTextCellFast(index, encoded_char, drawFg, drawAttributes)) {
-                                globalCharPos += g_width;
-                                currentX += @as(i32, @intCast(g_width));
-                                column_in_line += g_width;
-                                col += g_width;
-                                continue;
+                            if (self.coordsToIndex(@intCast(currentX), @intCast(currentY))) |index| {
+                                if (self.trySetTransparentTextCellFast(index, encoded_char, drawFg, drawAttributes)) {
+                                    globalCharPos += g_width;
+                                    currentX += @as(i32, @intCast(g_width));
+                                    column_in_line += g_width;
+                                    col += g_width;
+                                    continue;
+                                }
                             }
                         }
 
@@ -1880,10 +1884,11 @@ pub const OptimizedBuffer = struct {
                         }
 
                         if (useTransparentBorderFastPath) {
-                            const index = self.coordsToIndex(@intCast(drawX), @intCast(startY));
-                            self.buffer.char[index] = char;
-                            self.buffer.fg[index] = borderColor;
-                            self.buffer.attributes[index] = 0;
+                            if (self.coordsToIndex(@intCast(drawX), @intCast(startY))) |index| {
+                                self.buffer.char[index] = char;
+                                self.buffer.fg[index] = borderColor;
+                                self.buffer.attributes[index] = 0;
+                            }
                         } else {
                             try self.setCellWithAlphaBlending(@intCast(drawX), @intCast(startY), char, borderColor, backgroundColor, 0);
                         }
@@ -1910,10 +1915,11 @@ pub const OptimizedBuffer = struct {
                         }
 
                         if (useTransparentBorderFastPath) {
-                            const index = self.coordsToIndex(@intCast(drawX), @intCast(endY));
-                            self.buffer.char[index] = char;
-                            self.buffer.fg[index] = borderColor;
-                            self.buffer.attributes[index] = 0;
+                            if (self.coordsToIndex(@intCast(drawX), @intCast(endY))) |index| {
+                                self.buffer.char[index] = char;
+                                self.buffer.fg[index] = borderColor;
+                                self.buffer.attributes[index] = 0;
+                            }
                         } else {
                             try self.setCellWithAlphaBlending(@intCast(drawX), @intCast(endY), char, borderColor, backgroundColor, 0);
                         }
@@ -1932,10 +1938,11 @@ pub const OptimizedBuffer = struct {
                 // Left border
                 if (borderSides.left and isAtActualLeft and startX >= 0 and startX < @as(i32, @intCast(self.width))) {
                     if (useTransparentBorderFastPath) {
-                        const index = self.coordsToIndex(@intCast(startX), @intCast(drawY));
-                        self.buffer.char[index] = borderChars[@intFromEnum(BorderCharIndex.vertical)];
-                        self.buffer.fg[index] = borderColor;
-                        self.buffer.attributes[index] = 0;
+                        if (self.coordsToIndex(@intCast(startX), @intCast(drawY))) |index| {
+                            self.buffer.char[index] = borderChars[@intFromEnum(BorderCharIndex.vertical)];
+                            self.buffer.fg[index] = borderColor;
+                            self.buffer.attributes[index] = 0;
+                        }
                     } else {
                         try self.setCellWithAlphaBlending(@intCast(startX), @intCast(drawY), borderChars[@intFromEnum(BorderCharIndex.vertical)], borderColor, backgroundColor, 0);
                     }
@@ -1944,10 +1951,11 @@ pub const OptimizedBuffer = struct {
                 // Right border
                 if (borderSides.right and isAtActualRight and endX >= 0 and endX < @as(i32, @intCast(self.width))) {
                     if (useTransparentBorderFastPath) {
-                        const index = self.coordsToIndex(@intCast(endX), @intCast(drawY));
-                        self.buffer.char[index] = borderChars[@intFromEnum(BorderCharIndex.vertical)];
-                        self.buffer.fg[index] = borderColor;
-                        self.buffer.attributes[index] = 0;
+                        if (self.coordsToIndex(@intCast(endX), @intCast(drawY))) |index| {
+                            self.buffer.char[index] = borderChars[@intFromEnum(BorderCharIndex.vertical)];
+                            self.buffer.fg[index] = borderColor;
+                            self.buffer.attributes[index] = 0;
+                        }
                     } else {
                         try self.setCellWithAlphaBlending(@intCast(endX), @intCast(drawY), borderChars[@intFromEnum(BorderCharIndex.vertical)], borderColor, backgroundColor, 0);
                     }
